@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import plotly.graph_objects as go
 import pandas as pd
 
-# --- 1. Page Config (UPDATED) ---
+# --- 1. Page Config ---
 st.set_page_config(
     page_title="Fake News Detection with AI",
     page_icon="📰",
@@ -40,8 +40,10 @@ def load_model_and_vectorizer():
         model = joblib.load('fake_news_model.joblib')
         vectorizer = joblib.load('vectorizer.joblib')
         
+        # Pre-load coefficients for the 'thinking' chart
         feature_names = vectorizer.get_feature_names_out()
         coefficients = model.coef_[0]
+        # Create a mapping of word -> its importance score
         coef_map = pd.DataFrame({'feature': feature_names, 'coefficient': coefficients})
         coef_map = coef_map.set_index('feature')
         
@@ -101,12 +103,15 @@ def get_model_thinking(text_to_analyze, vectorizer, coef_map):
     cleaned_text = clean_text(text_to_analyze)
     words_in_text = set(cleaned_text.split())
     
+    # Find all words from the text that are in our model's vocabulary
     contributions = coef_map.loc[coef_map.index.intersection(words_in_text)]
     contributions = contributions.sort_values(by='coefficient', ascending=False)
     
+    # Get top 10 for 'Real' (positive) and top 10 for 'Fake' (negative)
     top_real = contributions.head(10)
     top_fake = contributions.tail(10)
     
+    # Combine them
     top_words_df = pd.concat([top_real, top_fake])
     top_words_df = top_words_df.reset_index()
     top_words_df['color'] = top_words_df['coefficient'].apply(lambda x: 'Real' if x > 0 else 'Fake')
@@ -210,7 +215,7 @@ def create_contribution_chart(df):
 if "analysis_results" not in st.session_state:
     st.session_state.analysis_results = None
 
-# --- 7. Sidebar (UPDATED) ---
+# --- 7. Sidebar ---
 with st.sidebar:
     st.title("About this AI Detector")
     st.markdown("""
@@ -250,7 +255,7 @@ with st.sidebar:
         unsafe_allow_html=True
     )
 
-# --- 8. Main App Layout (UPDATED) ---
+# --- 8. Main App Layout ---
 st.title("📰 Fake News Detection with AI")
 st.markdown("Paste an article in the box below to see its AI-powered classification.")
 st.divider()
@@ -278,12 +283,18 @@ with col1:
             st.session_state.analysis_results = None
             st.rerun()
 
-# --- Analysis Logic ---
+# --- Analysis Logic (FIXED) ---
 if submitted:
+    
+    # --- THIS IS THE FIX ---
+    # First, clear the old results to prevent a 'sticky' display
+    st.session_state.analysis_results = None
+    
     if model and vectorizer and text_input:
         results = {}
         with st.spinner("Analyzing..."):
-            ml_result = get_ml_prediction(text_input)
+            
+            ml_result = get_ml_prediction(text_input) 
             results["ml"] = ml_result
             
             thinking_df = get_model_thinking(text_input, vectorizer, coef_map)
@@ -299,6 +310,7 @@ if submitted:
                 else:
                     results["gemini"] = "Gemini is disabled (API key not found)."
         
+        # Now, set the new results
         st.session_state.analysis_results = results
     
     elif not text_input:
