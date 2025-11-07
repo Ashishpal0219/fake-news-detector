@@ -294,7 +294,7 @@ if submitted:
             
             if include_gemini:
                 if GEMINI_ENABLED:
-                    gemini_result = get_gemini_analysis(text_to_analyze, ml_result.get('label', 'Unknown'))
+                    gemini_result = get_gemini_analysis(text_input, ml_result.get('label', 'Unknown'))
                     results["gemini"] = gemini_result
                 else:
                     results["gemini"] = "Gemini is disabled (API key not found)."
