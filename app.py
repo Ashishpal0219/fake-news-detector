@@ -286,7 +286,7 @@ if submitted:
             ml_result = get_ml_prediction(text_input)
             results["ml"] = ml_result
             
-            thinking_df = get_model_thinking(text_to_analyze, vectorizer, coef_map)
+            thinking_df = get_model_thinking(text_input, vectorizer, coef_map)
             results["thinking"] = thinking_df
             
             if "error" in ml_result:
