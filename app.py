@@ -283,7 +283,7 @@ if submitted:
     if model and vectorizer and text_input:
         results = {}
         with st.spinner("Analyzing..."):
-            ml_result = get_ml_prediction(text_to_analyze)
+            ml_result = get_ml_prediction(text_input)
             results["ml"] = ml_result
             
             thinking_df = get_model_thinking(text_to_analyze, vectorizer, coef_map)
