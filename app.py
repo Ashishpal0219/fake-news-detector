@@ -95,7 +95,6 @@ def get_ml_prediction(text_to_analyze):
     except Exception as e:
         return {"error": str(e)}
 
-# --- THIS IS THE NEW "Model Thinking" FUNCTION ---
 def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
     """Finds the words in the text that most influenced the final decision."""
     if coef_map is None:
@@ -185,7 +184,6 @@ def create_gauge_chart(confidence, label):
     fig.update_layout(height=350, margin=dict(l=20, r=20, t=50, b=20))
     return fig
 
-# --- THIS IS THE NEW Bar Chart FUNCTION ---
 def create_contribution_chart(df, title):
     """Creates a Plotly bar chart of word contributions."""
     if df is None or df.empty:
@@ -196,12 +194,12 @@ def create_contribution_chart(df, title):
         x=df['coefficient'],
         y=df['feature'],
         orientation='h',
-        marker_color=df['color'], # Use the color from our new logic
+        marker_color=df['color'],
         text=df['coefficient'].apply(lambda x: f'{x:.2f}'),
         textposition='auto'
     ))
     fig.update_layout(
-        title=title, # Use the new dynamic title
+        title=title,
         xaxis_title="Impact Score (Coefficient)",
         yaxis_title="Word",
         yaxis=dict(autorange="reversed"),
@@ -246,7 +244,7 @@ with st.sidebar:
 
     st.subheader("Training Data")
     st.markdown(
-        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](https://huggingface.co/datasets/ag_news)", 
+        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](httpswww.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)", 
         unsafe_allow_html=True
     )
     st.markdown(
@@ -282,7 +280,7 @@ with col1:
             st.session_state.analysis_results = None
             st.rerun()
 
-# --- Analysis Logic (THIS IS THE FIX) ---
+# --- Analysis Logic (ALL FIXES APPLIED) ---
 if submitted:
     
     st.session_state.analysis_results = None
@@ -294,13 +292,12 @@ if submitted:
             ml_result = get_ml_prediction(text_input) 
             results["ml"] = ml_result
             
-            # --- NEW LOGIC ---
-            # Pass the final label ("Real" or "Fake") to the thinking function
+            # This now correctly uses 'text_input'
             thinking_df, thinking_title = get_model_thinking(
                 text_input, 
                 vectorizer, 
                 coef_map,
-                ml_result.get('label', 'Fake') # Get the final label
+                ml_result.get('label', 'Fake')
             )
             results["thinking_df"] = thinking_df
             results["thinking_title"] = thinking_title
@@ -310,7 +307,8 @@ if submitted:
             
             if include_gemini:
                 if GEMINI_ENABLED:
-                    gemini_result = get_genimi_analysis(text_input, ml_result.get('label', 'Unknown'))
+                    # This now correctly uses 'text_input' and 'get_gemini_analysis'
+                    gemini_result = get_gemini_analysis(text_input, ml_result.get('label', 'Unknown'))
                     results["gemini"] = gemini_result
                 else:
                     results["gemini"] = "Gemini is disabled (API key not found)."
@@ -322,7 +320,7 @@ if submitted:
     else:
         st.warning("Model is not loaded. Check for errors above.")
 
-# --- Right Column (Results with TABS - THIS IS THE FIX) ---
+# --- Right Column (Results with TABS) ---
 with col2:
     with st.container(border=True):
         
@@ -339,13 +337,11 @@ with col2:
                     gauge_fig = create_gauge_chart(results["ml"]['confidence'], results["ml"]['label'])
                     st.plotly_chart(gauge_fig, use_container_width=True)
                 else:
-                    st.error(f"ML Model Error: {results['ml'].get('error', 'Unknown')}")
+                    st.error(f"ML Model Error: {results['ml']..get('error', 'Unknown')}")
 
             with tab2:
                 st.subheader("Model Thinking")
                 if "thinking_df" in results:
-                    # --- NEW LOGIC ---
-                    # Pass the dataframe AND the new title to the chart function
                     contribution_fig = create_contribution_chart(
                         results["thinking_df"], 
                         results["thinking_title"]
