@@ -337,7 +337,7 @@ with col2:
                     gauge_fig = create_gauge_chart(results["ml"]['confidence'], results["ml"]['label'])
                     st.plotly_chart(gauge_fig, use_container_width=True)
                 else:
-                    st.error(f"ML Model Error: {results['ml']..get('error', 'Unknown')}")
+                    st.error(f"ML Model Error: {results['ml'].get('error', 'Unknown')}")
 
             with tab2:
                 st.subheader("Model Thinking")
