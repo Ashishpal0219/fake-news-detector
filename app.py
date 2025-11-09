@@ -95,8 +95,9 @@ def get_ml_prediction(text_to_analyze):
     except Exception as e:
         return {"error": str(e)}
 
-def get_model_thinking(text_to_analyze, vectorizer, coef_map):
-    """Finds the words in the text that most influenced the model."""
+# --- THIS IS THE NEW "Model Thinking" FUNCTION ---
+def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
+    """Finds the words in the text that most influenced the final decision."""
     if coef_map is None:
         return None
         
@@ -105,17 +106,21 @@ def get_model_thinking(text_to_analyze, vectorizer, coef_map):
     
     # Find all words from the text that are in our model's vocabulary
     contributions = coef_map.loc[coef_map.index.intersection(words_in_text)]
-    contributions = contributions.sort_values(by='coefficient', ascending=False)
     
-    # Get top 10 for 'Real' (positive) and top 10 for 'Fake' (negative)
-    top_real = contributions.head(10)
-    top_fake = contributions.tail(10)
-    
-    # Combine them
-    top_words_df = pd.concat([top_real, top_fake])
+    # --- NEW LOGIC ---
+    if final_label == "Real":
+        # If the result is "Real", get the Top 15 positive words
+        top_words_df = contributions[contributions['coefficient'] > 0].sort_values(by='coefficient', ascending=False).head(15)
+        top_words_df['color'] = '#28a745' # Green
+        title = "Top 15 Words Pushing Result to 'REAL'"
+    else:
+        # If the result is "Fake", get the Top 15 negative words
+        top_words_df = contributions[contributions['coefficient'] < 0].sort_values(by='coefficient', ascending=True).head(15)
+        top_words_df['color'] = '#dc3545' # Red
+        title = "Top 15 Words Pushing Result to 'FAKE'"
+        
     top_words_df = top_words_df.reset_index()
-    top_words_df['color'] = top_words_df['coefficient'].apply(lambda x: 'Real' if x > 0 else 'Fake')
-    return top_words_df.sort_values(by='coefficient', ascending=False)
+    return top_words_df, title
 
 
 def get_gemini_analysis(text_to_analyze, original_label):
@@ -152,14 +157,8 @@ def get_gemini_analysis(text_to_analyze, original_label):
 
 def create_gauge_chart(confidence, label):
     """Creates a Plotly gauge chart."""
-    
-
     value = confidence * 100
-    
-    if label == "Real":
-        color = "#28a745" # Green
-    else:
-        color = "#dc3545" # Red
+    color = "#28a745" if label == "Real" else "#dc3545"
 
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
@@ -186,9 +185,9 @@ def create_gauge_chart(confidence, label):
     fig.update_layout(height=350, margin=dict(l=20, r=20, t=50, b=20))
     return fig
 
-def create_contribution_chart(df):
+# --- THIS IS THE NEW Bar Chart FUNCTION ---
+def create_contribution_chart(df, title):
     """Creates a Plotly bar chart of word contributions."""
-    
     if df is None or df.empty:
         return go.Figure().update_layout(title="No influential words found in model's vocabulary.")
         
@@ -197,12 +196,12 @@ def create_contribution_chart(df):
         x=df['coefficient'],
         y=df['feature'],
         orientation='h',
-        marker_color=df['color'].map({'Real': '#28a745', 'Fake': '#dc3545'}),
+        marker_color=df['color'], # Use the color from our new logic
         text=df['coefficient'].apply(lambda x: f'{x:.2f}'),
         textposition='auto'
     ))
     fig.update_layout(
-        title="Top Words Influencing the Model's Decision",
+        title=title, # Use the new dynamic title
         xaxis_title="Impact Score (Coefficient)",
         yaxis_title="Word",
         yaxis=dict(autorange="reversed"),
@@ -283,11 +282,9 @@ with col1:
             st.session_state.analysis_results = None
             st.rerun()
 
-# --- Analysis Logic (FIXED) ---
+# --- Analysis Logic (THIS IS THE FIX) ---
 if submitted:
     
-    # --- THIS IS THE FIX ---
-    # First, clear the old results to prevent a 'sticky' display
     st.session_state.analysis_results = None
     
     if model and vectorizer and text_input:
@@ -297,20 +294,27 @@ if submitted:
             ml_result = get_ml_prediction(text_input) 
             results["ml"] = ml_result
             
-            thinking_df = get_model_thinking(text_input, vectorizer, coef_map)
-            results["thinking"] = thinking_df
+            # --- NEW LOGIC ---
+            # Pass the final label ("Real" or "Fake") to the thinking function
+            thinking_df, thinking_title = get_model_thinking(
+                text_input, 
+                vectorizer, 
+                coef_map,
+                ml_result.get('label', 'Fake') # Get the final label
+            )
+            results["thinking_df"] = thinking_df
+            results["thinking_title"] = thinking_title
             
             if "error" in ml_result:
                 st.error(f"ML Model Error: {ml_result['error']}")
             
             if include_gemini:
                 if GEMINI_ENABLED:
-                    gemini_result = get_gemini_analysis(text_input, ml_result.get('label', 'Unknown'))
+                    gemini_result = get_genimi_analysis(text_input, ml_result.get('label', 'Unknown'))
                     results["gemini"] = gemini_result
                 else:
                     results["gemini"] = "Gemini is disabled (API key not found)."
         
-        # Now, set the new results
         st.session_state.analysis_results = results
     
     elif not text_input:
@@ -318,7 +322,7 @@ if submitted:
     else:
         st.warning("Model is not loaded. Check for errors above.")
 
-# --- Right Column (Results with TABS) ---
+# --- Right Column (Results with TABS - THIS IS THE FIX) ---
 with col2:
     with st.container(border=True):
         
@@ -338,9 +342,14 @@ with col2:
                     st.error(f"ML Model Error: {results['ml'].get('error', 'Unknown')}")
 
             with tab2:
-                st.subheader("Top Influential Words")
-                if "thinking" in results:
-                    contribution_fig = create_contribution_chart(results["thinking"])
+                st.subheader("Model Thinking")
+                if "thinking_df" in results:
+                    # --- NEW LOGIC ---
+                    # Pass the dataframe AND the new title to the chart function
+                    contribution_fig = create_contribution_chart(
+                        results["thinking_df"], 
+                        results["thinking_title"]
+                    )
                     st.plotly_chart(contribution_fig, use_container_width=True)
                 else:
                     st.info("Could not generate the model thinking chart.")
