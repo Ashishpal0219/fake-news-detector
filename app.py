@@ -3,7 +3,8 @@ import joblib
 import re
 import string
 import os
-from google import genai                          # ✅ NEW SDK
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 import plotly.graph_objects as go
 import pandas as pd
@@ -22,7 +23,7 @@ try:
     api_key = os.environ["GOOGLE_API_KEY"]
     if not api_key:
         raise KeyError
-    client = genai.Client(api_key=api_key)        # ✅ NEW: Client-based init
+    client = genai.Client(api_key=api_key)
     GEMINI_ENABLED = True
 except KeyError:
     st.error("Warning: GOOGLE_API_KEY not found. Gemini features will be disabled.")
@@ -40,15 +41,14 @@ def load_model_and_vectorizer():
     try:
         model = joblib.load('fake_news_model.joblib')
         vectorizer = joblib.load('vectorizer.joblib')
-        
-        # Pre-load coefficients for the 'thinking' chart
+
         feature_names = vectorizer.get_feature_names_out()
         coefficients = model.coef_[0]
         coef_map = pd.DataFrame({'feature': feature_names, 'coefficient': coefficients})
         coef_map = coef_map.set_index('feature')
-        
+
         return model, vectorizer, coef_map
-    
+
     except FileNotFoundError:
         st.error("Error: Model/vectorizer files not found. Please run 'train.py' first.")
         return None, None, None
@@ -84,7 +84,7 @@ def get_ml_prediction(text_to_analyze):
         text_tfidf = vectorizer.transform([cleaned_text])
         prediction_code = model.predict(text_tfidf)[0]
         probabilities = model.predict_proba(text_tfidf)[0]
-        
+
         if prediction_code == 1:
             label = "Real"
             confidence = probabilities[1]
@@ -99,11 +99,11 @@ def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
     """Finds the words in the text that most influenced the final decision."""
     if coef_map is None:
         return None, ""
-        
+
     cleaned_text = clean_text(text_to_analyze)
     words_in_text = set(cleaned_text.split())
     contributions = coef_map.loc[coef_map.index.intersection(words_in_text)]
-    
+
     if final_label == "Real":
         top_words_df = contributions[contributions['coefficient'] > 0].sort_values(by='coefficient', ascending=False).head(15)
         top_words_df['color'] = '#28a745'
@@ -112,31 +112,33 @@ def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
         top_words_df = contributions[contributions['coefficient'] < 0].sort_values(by='coefficient', ascending=True).head(15)
         top_words_df['color'] = '#dc3545'
         title = "Top 15 Words Pushing Result to 'FAKE'"
-        
+
     top_words_df = top_words_df.reset_index()
     return top_words_df, title
 
 
 def get_gemini_analysis(text_to_analyze, original_label):
-    """Gets Gemini analysis using the new google-genai SDK."""
+    """Gets Gemini analysis with real-time Google Search grounding."""
     if not GEMINI_ENABLED or client is None:
         return "Gemini is not configured."
     if not text_to_analyze:
         return "No text to analyze."
     try:
         prompt = f"""
-        You are a fact-checking news assistant.
-        Please provide a neutral analysis of the following article text.
+        You are a fact-checking news assistant with access to real-time web search.
+        Please search the web to verify the claims in the article before analysing it.
 
         1.  **Key Claims:** Summarize the main claims in 3 bullet points.
         2.  **Credibility Analysis:** Point out 2-3 "red flags" (or "green flags") that suggest
             it is (or isn't) credible (e.g., loaded language, anonymous sources, verifiable data, etc.).
-        3.  **Final Verdict:** Based on your analysis, do you believe this article is
-            more likely to be **Real** or **Fake**? State your conclusion clearly.
-        4.  **Verification:** (Optional) If, and only if, you conclude the article is **Real** 
-            and describes a verifiable event, provide 1-2 source links that corroborate the story. 
-            If you conclude it's Fake, or if you cannot find any links, 
-            **just skip this section and do not mention it.**
+            IMPORTANT: If you are unfamiliar with an event or person mentioned, search for it first
+            before calling it a red flag. Do NOT mark something as fake simply because it sounds
+            unfamiliar — it may be a very recent real event.
+        3.  **Final Verdict:** Based on your analysis and web search results, do you believe
+            this article is more likely to be **Real** or **Fake**? State your conclusion clearly.
+        4.  **Verification:** (Optional) If you conclude the article is **Real** and describes
+            a verifiable event, provide 1-2 source links that corroborate the story.
+            If you conclude it's Fake, or cannot find links, skip this section entirely.
 
         Article Text:
         ---
@@ -144,10 +146,13 @@ def get_gemini_analysis(text_to_analyze, original_label):
         ---
         """
 
-        # ✅ NEW: client.models.generate_content() replaces gemini_model.generate_content()
+        # ✅ Google Search grounding — lets Gemini search the web in real time
         response = client.models.generate_content(
-            model="gemini-2.5-flash",             # ✅ Changed from gemini-2.5-pro
-            contents=prompt
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())]
+            )
         )
         return response.text
     except Exception as e:
@@ -163,7 +168,7 @@ def create_gauge_chart(confidence, label):
     fig = go.Figure(go.Indicator(
         mode = "gauge+number",
         value = value,
-        number = {'suffix': "%", 'font': {'size': 24}}, 
+        number = {'suffix': "%", 'font': {'size': 24}},
         title = {'text': f"Result: {label}", 'font': {'size': 28, 'color': color}},
         gauge = {
             'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkgrey"},
@@ -189,7 +194,7 @@ def create_contribution_chart(df, title):
     """Creates a Plotly bar chart of word contributions."""
     if df is None or df.empty:
         return go.Figure().update_layout(title="No influential words found in model's vocabulary.")
-        
+
     fig = go.Figure()
     fig.add_trace(go.Bar(
         x=df['coefficient'],
@@ -218,38 +223,46 @@ with st.sidebar:
     st.title("About this AI Detector")
     st.markdown("""
         This app is a **Fake News Detector** powered by a two-layer AI system.
-        
-        It combines a custom-trained local model with a large language model (LLM) 
+
+        It combines a custom-trained local model with a large language model (LLM)
         to provide a comprehensive analysis of news articles.
     """)
     st.divider()
-    
+
     st.subheader("How the AI Works")
     st.markdown("""
-        1.  **Local Model:** A `LogisticRegression` classifier gives a fast "Fake" or "Real" 
-            prediction. It's trained to be a *specialist*.
-        2.  **Gemini Analysis:** The `gemini-2.5-flash` model acts as a *generalist*, 
-            analyzing the article's tone, claims, and verifying sources.
+        1.  **Local Model:** A `LogisticRegression` classifier gives a fast "Fake" or "Real"
+            prediction. It's trained to be a *specialist* in writing patterns.
+        2.  **Gemini Analysis:** The `gemini-2.5-flash` model acts as a *generalist*,
+            using **real-time web search** to verify claims and sources.
     """)
     st.divider()
-    
+
     st.subheader("Key Technologies Used:")
     st.markdown("""
         * **App Framework:** `Streamlit`
         * **Local Model:** `Scikit-learn` & `Pandas`
         * **Charts:** `Plotly`
-        * **AI Analysis:** `Google Gemini API`
+        * **AI Analysis:** `Google Gemini API` with Search Grounding
         * **Data Sources:** `Hugging Face datasets` & `Kaggle`
+    """)
+    st.divider()
+
+    st.subheader("⚠️ Note on Recent Events")
+    st.markdown("""
+        The **local model** detects fake news based on *writing patterns*, not facts.
+        For factual verification of recent events, enable **Gemini Deeper Analysis**
+        which uses real-time web search.
     """)
     st.divider()
 
     st.subheader("Training Data")
     st.markdown(
-        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)", 
+        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)",
         unsafe_allow_html=True
     )
     st.markdown(
-        "**Fake News (Political):** `Fake/Real News` (23,000 articles) from [Kaggle](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)", 
+        "**Fake News (Political):** `Fake/Real News` (23,000 articles) from [Kaggle](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)",
         unsafe_allow_html=True
     )
 
@@ -271,9 +284,9 @@ with col1:
                 placeholder="Once you paste the text, click 'Analyze' below."
             )
             include_gemini = st.checkbox(
-                "Include Gemini Deeper Analysis",
+                "Include Gemini Deeper Analysis (with real-time web search)",
                 value=False,
-                help="Get a summary and red-flag analysis (slower). Uses API quota."
+                help="Gemini will search the web to verify claims. Recommended for recent news."
             )
             submitted = st.form_submit_button("Analyze", type="primary")
 
@@ -283,37 +296,37 @@ with col1:
 
 # --- Analysis Logic ---
 if submitted:
-    
+
     st.session_state.analysis_results = None
-    
+
     if model and vectorizer and text_input:
         results = {}
         with st.spinner("Analyzing..."):
-            
-            ml_result = get_ml_prediction(text_input) 
+
+            ml_result = get_ml_prediction(text_input)
             results["ml"] = ml_result
-            
+
             thinking_df, thinking_title = get_model_thinking(
-                text_input, 
-                vectorizer, 
+                text_input,
+                vectorizer,
                 coef_map,
                 ml_result.get('label', 'Fake')
             )
             results["thinking_df"] = thinking_df
             results["thinking_title"] = thinking_title
-            
+
             if "error" in ml_result:
                 st.error(f"ML Model Error: {ml_result['error']}")
-            
+
             if include_gemini:
                 if GEMINI_ENABLED:
                     gemini_result = get_gemini_analysis(text_input, ml_result.get('label', 'Unknown'))
                     results["gemini"] = gemini_result
                 else:
                     results["gemini"] = "Gemini is disabled (API key not found)."
-        
+
         st.session_state.analysis_results = results
-    
+
     elif not text_input:
         st.warning("Please enter some text to analyze.")
     else:
@@ -322,7 +335,7 @@ if submitted:
 # --- Right Column (Results with TABS) ---
 with col2:
     with st.container(border=True):
-        
+
         if st.session_state.analysis_results is None:
             st.subheader("📊 Results")
             st.info("Results will appear here after you analyze an article.")
@@ -332,6 +345,7 @@ with col2:
 
             with tab1:
                 st.subheader("Local Model Prediction")
+                st.caption("⚠️ Based on writing patterns only — not factual accuracy.")
                 if "ml" in results and "error" not in results["ml"]:
                     gauge_fig = create_gauge_chart(results["ml"]['confidence'], results["ml"]['label'])
                     st.plotly_chart(gauge_fig, use_container_width=True)
@@ -342,16 +356,17 @@ with col2:
                 st.subheader("Model Thinking")
                 if "thinking_df" in results:
                     contribution_fig = create_contribution_chart(
-                        results["thinking_df"], 
+                        results["thinking_df"],
                         results["thinking_title"]
                     )
                     st.plotly_chart(contribution_fig, use_container_width=True)
                 else:
                     st.info("Could not generate the model thinking chart.")
-                
+
             with tab3:
                 st.subheader("Gemini Deeper Analysis")
+                st.caption("🔍 Uses real-time web search to verify claims.")
                 if "gemini" in results:
                     st.markdown(results["gemini"])
                 else:
-                    st.info("You did not select the Gemini analysis for this run.")
+                    st.info("Enable 'Gemini Deeper Analysis' and re-run to see results here.")
