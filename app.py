@@ -3,6 +3,7 @@ import joblib
 import re
 import string
 import os
+import time
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
@@ -74,7 +75,7 @@ def clean_text(text):
     return text
 
 def get_ml_prediction(text_to_analyze):
-    """Predicts using the loaded scikit-learn model."""
+    """Predicts using the loaded scikit-learn model with uncertainty zone."""
     if not model or not vectorizer or not text_to_analyze:
         return None
     try:
@@ -85,12 +86,19 @@ def get_ml_prediction(text_to_analyze):
         prediction_code = model.predict(text_tfidf)[0]
         probabilities = model.predict_proba(text_tfidf)[0]
 
-        if prediction_code == 1:
+        max_confidence = max(probabilities)
+
+        # ✅ Uncertainty zone — avoids forcing Real/Fake on low-confidence predictions
+        if max_confidence < 0.60:
+            label = "Uncertain"
+            confidence = max_confidence
+        elif prediction_code == 1:
             label = "Real"
             confidence = probabilities[1]
         else:
             label = "Fake"
             confidence = probabilities[0]
+
         return {"label": label, "confidence": confidence}
     except Exception as e:
         return {"error": str(e)}
@@ -108,69 +116,128 @@ def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
         top_words_df = contributions[contributions['coefficient'] > 0].sort_values(by='coefficient', ascending=False).head(15)
         top_words_df['color'] = '#28a745'
         title = "Top 15 Words Pushing Result to 'REAL'"
-    else:
+    elif final_label == "Fake":
         top_words_df = contributions[contributions['coefficient'] < 0].sort_values(by='coefficient', ascending=True).head(15)
         top_words_df['color'] = '#dc3545'
         title = "Top 15 Words Pushing Result to 'FAKE'"
+    else:
+        # Uncertain — show both positive and negative top words
+        top_pos = contributions[contributions['coefficient'] > 0].sort_values(by='coefficient', ascending=False).head(8)
+        top_neg = contributions[contributions['coefficient'] < 0].sort_values(by='coefficient', ascending=True).head(7)
+        top_pos['color'] = '#28a745'
+        top_neg['color'] = '#dc3545'
+        top_words_df = pd.concat([top_pos, top_neg])
+        title = "Top Words (Mixed Signals — Uncertain Result)"
 
     top_words_df = top_words_df.reset_index()
     return top_words_df, title
 
 
+@st.cache_data(ttl=3600)
+def cached_gemini_analysis(text_to_analyze):
+    """Cached wrapper for Gemini analysis — saves quota on repeated identical inputs."""
+    return get_gemini_analysis(text_to_analyze, "")
+
+
 def get_gemini_analysis(text_to_analyze, original_label):
-    """Gets Gemini analysis with real-time Google Search grounding."""
+    """Gets Gemini analysis with Search Grounding, retry logic, and fallback."""
     if not GEMINI_ENABLED or client is None:
-        return "Gemini is not configured."
+        return "⚠️ Gemini is not configured."
     if not text_to_analyze:
-        return "No text to analyze."
-    try:
-        prompt = f"""
-        You are a fact-checking news assistant with access to real-time web search.
-        Please search the web to verify the claims in the article before analysing it.
+        return "⚠️ No text to analyze."
 
-        1.  **Key Claims:** Summarize the main claims in 3 bullet points.
-        2.  **Credibility Analysis:** Point out 2-3 "red flags" (or "green flags") that suggest
-            it is (or isn't) credible (e.g., loaded language, anonymous sources, verifiable data, etc.).
-            IMPORTANT: If you are unfamiliar with an event or person mentioned, search for it first
-            before calling it a red flag. Do NOT mark something as fake simply because it sounds
-            unfamiliar — it may be a very recent real event.
-        3.  **Final Verdict:** Based on your analysis and web search results, do you believe
-            this article is more likely to be **Real** or **Fake**? State your conclusion clearly.
-        4.  **Verification:** (Optional) If you conclude the article is **Real** and describes
-            a verifiable event, provide 1-2 source links that corroborate the story.
-            If you conclude it's Fake, or cannot find links, skip this section entirely.
+    prompt = f"""
+    You are a fact-checking news assistant with access to real-time web search.
+    Search the web to verify the claims in the article before analysing it.
 
-        Article Text:
-        ---
-        {text_to_analyze}
-        ---
-        """
+    1.  **Key Claims:** Summarize the main claims in 3 bullet points.
+    2.  **Credibility Analysis:** Point out 2-3 red flags or green flags regarding credibility
+        (e.g., loaded language, anonymous sources, verifiable data).
+        IMPORTANT: If you are unfamiliar with an event, search for it first before calling it
+        a red flag. Do NOT mark something as fake simply because it sounds unfamiliar —
+        it may be a very recent real event.
+    3.  **Final Verdict:** Based on your analysis and search results, state:
+        - **Real** — if the article is credible and verifiable
+        - **Fake** — if the article contains clear misinformation
+        - **Uncertain** — if evidence is insufficient to decide either way
+    4.  **Verification:** (Optional) If you conclude Real, provide 1-2 source links.
+        If Fake or Uncertain, skip this section entirely.
 
-        # ✅ Google Search grounding — lets Gemini search the web in real time
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())]
-            )
-        )
-        return response.text
-    except Exception as e:
-        return f"An error occurred during Gemini analysis: {e}"
+    Article Text:
+    ---
+    {text_to_analyze}
+    ---
+    """
+
+    max_retries = 3
+
+    for attempt in range(max_retries):
+        try:
+            # ✅ First attempt: Search Grounding enabled
+            try:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())]
+                    )
+                )
+            except Exception:
+                # ✅ Fallback: Search Grounding unavailable, use standard Gemini
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash",
+                    contents=prompt
+                )
+
+            return response.text
+
+        except Exception as e:
+            error_msg = str(e)
+
+            if "503" in error_msg:
+                if attempt < max_retries - 1:
+                    time.sleep((attempt + 1) * 5)  # 5s, 10s, 15s
+                    continue
+                return (
+                    "⚠️ **Gemini is currently experiencing high demand (503).**\n\n"
+                    "The local ML prediction above is still valid.\n\n"
+                    "Please try the Gemini analysis again in a few minutes."
+                )
+
+            elif "429" in error_msg:
+                return (
+                    "⚠️ **Gemini API quota exceeded (429).**\n\n"
+                    "The local model is still working normally.\n\n"
+                    "Please check your Gemini API quota or billing at "
+                    "[Google AI Studio](https://aistudio.google.com)."
+                )
+
+            else:
+                return f"⚠️ Gemini Error: {error_msg}"
+
+    return "⚠️ Gemini service unavailable after retries. Please try again later."
+
 
 # --- 5. Plotting Functions ---
 
 def create_gauge_chart(confidence, label):
-    """Creates a Plotly gauge chart."""
+    """Creates a Plotly gauge chart with Real/Fake/Uncertain colors."""
     value = confidence * 100
-    color = "#28a745" if label == "Real" else "#dc3545"
+
+    # ✅ Three-state color: green, red, amber
+    if label == "Real":
+        color = "#28a745"
+    elif label == "Fake":
+        color = "#dc3545"
+    else:
+        color = "#ffc107"  # Uncertain → amber
 
     fig = go.Figure(go.Indicator(
-        mode = "gauge+number",
-        value = value,
-        number = {'suffix': "%", 'font': {'size': 24}},
-        title = {'text': f"Result: {label}", 'font': {'size': 28, 'color': color}},
-        gauge = {
+        mode="gauge+number",
+        value=value,
+        number={'suffix': "%", 'font': {'size': 24}},
+        title={'text': f"Result: {label}", 'font': {'size': 28, 'color': color}},
+        gauge={
             'axis': {'range': [0, 100], 'tickwidth': 1, 'tickcolor': "darkgrey"},
             'bar': {'color': color, 'thickness': 0.3},
             'bgcolor': "white",
@@ -231,10 +298,11 @@ with st.sidebar:
 
     st.subheader("How the AI Works")
     st.markdown("""
-        1.  **Local Model:** A `LogisticRegression` classifier gives a fast "Fake" or "Real"
-            prediction. It's trained to be a *specialist* in writing patterns.
-        2.  **Gemini Analysis:** The `gemini-2.5-flash` model acts as a *generalist*,
-            using **real-time web search** to verify claims and sources.
+        1.  **Local Model:** A `LogisticRegression` classifier gives a fast "Fake", "Real",
+            or "Uncertain" prediction based on *writing patterns*.
+        2.  **Gemini Analysis:** The `gemini-2.5-flash` model uses **Search Grounding**
+            (when available) to verify claims with real-time web search,
+            with automatic fallback to standard Gemini analysis.
     """)
     st.divider()
 
@@ -248,21 +316,23 @@ with st.sidebar:
     """)
     st.divider()
 
-    st.subheader("⚠️ Note on Recent Events")
+    st.subheader("⚠️ Important Notes")
     st.markdown("""
-        The **local model** detects fake news based on *writing patterns*, not facts.
-        For factual verification of recent events, enable **Gemini Deeper Analysis**
-        which uses real-time web search.
+        - The **local model** detects writing patterns, not factual accuracy.
+        - For recent events, enable **Gemini Deeper Analysis** for web-verified results.
+        - Gemini uses Search Grounding when available, with automatic fallback to
+          standard analysis.
+        - Always verify critical information independently.
     """)
     st.divider()
 
     st.subheader("Training Data")
     st.markdown(
-        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)",
+        "**Real News:** `AG News Dataset` (127,600 articles) from [Hugging Face](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)",
         unsafe_allow_html=True
     )
     st.markdown(
-        "**Fake News (Political):** `Fake/Real News` (23,000 articles) from [Kaggle](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)",
+        "**Fake News:** `Fake/Real News` (23,000 articles) from [Kaggle](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)",
         unsafe_allow_html=True
     )
 
@@ -320,10 +390,11 @@ if submitted:
 
             if include_gemini:
                 if GEMINI_ENABLED:
-                    gemini_result = get_gemini_analysis(text_input, ml_result.get('label', 'Unknown'))
+                    # ✅ Use cached version to save quota on repeated identical inputs
+                    gemini_result = cached_gemini_analysis(text_input)
                     results["gemini"] = gemini_result
                 else:
-                    results["gemini"] = "Gemini is disabled (API key not found)."
+                    results["gemini"] = "⚠️ Gemini is disabled (API key not found)."
 
         st.session_state.analysis_results = results
 
@@ -349,6 +420,8 @@ with col2:
                 if "ml" in results and "error" not in results["ml"]:
                     gauge_fig = create_gauge_chart(results["ml"]['confidence'], results["ml"]['label'])
                     st.plotly_chart(gauge_fig, use_container_width=True)
+                    if results["ml"]['label'] == "Uncertain":
+                        st.warning("The model is not confident enough to classify this article. Try Gemini Deeper Analysis for a more reliable verdict.")
                 else:
                     st.error(f"ML Model Error: {results['ml'].get('error', 'Unknown')}")
 
@@ -365,8 +438,9 @@ with col2:
 
             with tab3:
                 st.subheader("Gemini Deeper Analysis")
-                st.caption("🔍 Uses real-time web search to verify claims.")
+                st.caption("🔍 Uses Search Grounding when available, with automatic fallback.")
                 if "gemini" in results:
                     st.markdown(results["gemini"])
+                    st.caption("Gemini analysis uses AI reasoning and web search. Always verify critical information independently.")
                 else:
                     st.info("Enable 'Gemini Deeper Analysis' and re-run to see results here.")
