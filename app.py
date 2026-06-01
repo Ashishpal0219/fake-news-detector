@@ -3,7 +3,7 @@ import joblib
 import re
 import string
 import os
-import google.generativeai as genai
+from google import genai                          # ✅ NEW SDK
 from dotenv import load_dotenv
 import plotly.graph_objects as go
 import pandas as pd
@@ -22,15 +22,16 @@ try:
     api_key = os.environ["GOOGLE_API_KEY"]
     if not api_key:
         raise KeyError
-    genai.configure(api_key=api_key)
-    gemini_model = genai.GenerativeModel('models/gemini-2.5-pro')
+    client = genai.Client(api_key=api_key)        # ✅ NEW: Client-based init
     GEMINI_ENABLED = True
 except KeyError:
     st.error("Warning: GOOGLE_API_KEY not found. Gemini features will be disabled.")
     GEMINI_ENABLED = False
+    client = None
 except Exception as e:
     st.error(f"Error initializing Gemini: {e}")
     GEMINI_ENABLED = False
+    client = None
 
 # --- 3. Load ML Model (Cached) ---
 @st.cache_resource
@@ -43,7 +44,6 @@ def load_model_and_vectorizer():
         # Pre-load coefficients for the 'thinking' chart
         feature_names = vectorizer.get_feature_names_out()
         coefficients = model.coef_[0]
-        # Create a mapping of word -> its importance score
         coef_map = pd.DataFrame({'feature': feature_names, 'coefficient': coefficients})
         coef_map = coef_map.set_index('feature')
         
@@ -98,24 +98,19 @@ def get_ml_prediction(text_to_analyze):
 def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
     """Finds the words in the text that most influenced the final decision."""
     if coef_map is None:
-        return None
+        return None, ""
         
     cleaned_text = clean_text(text_to_analyze)
     words_in_text = set(cleaned_text.split())
-    
-    # Find all words from the text that are in our model's vocabulary
     contributions = coef_map.loc[coef_map.index.intersection(words_in_text)]
     
-    # --- NEW LOGIC ---
     if final_label == "Real":
-        # If the result is "Real", get the Top 15 positive words
         top_words_df = contributions[contributions['coefficient'] > 0].sort_values(by='coefficient', ascending=False).head(15)
-        top_words_df['color'] = '#28a745' # Green
+        top_words_df['color'] = '#28a745'
         title = "Top 15 Words Pushing Result to 'REAL'"
     else:
-        # If the result is "Fake", get the Top 15 negative words
         top_words_df = contributions[contributions['coefficient'] < 0].sort_values(by='coefficient', ascending=True).head(15)
-        top_words_df['color'] = '#dc3545' # Red
+        top_words_df['color'] = '#dc3545'
         title = "Top 15 Words Pushing Result to 'FAKE'"
         
     top_words_df = top_words_df.reset_index()
@@ -123,8 +118,8 @@ def get_model_thinking(text_to_analyze, vectorizer, coef_map, final_label):
 
 
 def get_gemini_analysis(text_to_analyze, original_label):
-    """Gets Gemini analysis, asks for a final verdict, and asks for links."""
-    if not GEMINI_ENABLED:
+    """Gets Gemini analysis using the new google-genai SDK."""
+    if not GEMINI_ENABLED or client is None:
         return "Gemini is not configured."
     if not text_to_analyze:
         return "No text to analyze."
@@ -138,16 +133,22 @@ def get_gemini_analysis(text_to_analyze, original_label):
             it is (or isn't) credible (e.g., loaded language, anonymous sources, verifiable data, etc.).
         3.  **Final Verdict:** Based on your analysis, do you believe this article is
             more likely to be **Real** or **Fake**? State your conclusion clearly.
-        4.  **Verification:** (Optional) If, and only if, you conclude the article is **Real** and describes a verifiable event, please perform a web search and provide 1-2 
-            source links that corroborate the story. If you conclude it's Fake, or 
-            if you cannot find any links, **just skip this section and do not mention it.**
+        4.  **Verification:** (Optional) If, and only if, you conclude the article is **Real** 
+            and describes a verifiable event, provide 1-2 source links that corroborate the story. 
+            If you conclude it's Fake, or if you cannot find any links, 
+            **just skip this section and do not mention it.**
 
         Article Text:
         ---
         {text_to_analyze}
         ---
         """
-        response = gemini_model.generate_content(prompt)
+
+        # ✅ NEW: client.models.generate_content() replaces gemini_model.generate_content()
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",             # ✅ Changed from gemini-2.5-pro
+            contents=prompt
+        )
         return response.text
     except Exception as e:
         return f"An error occurred during Gemini analysis: {e}"
@@ -227,7 +228,7 @@ with st.sidebar:
     st.markdown("""
         1.  **Local Model:** A `LogisticRegression` classifier gives a fast "Fake" or "Real" 
             prediction. It's trained to be a *specialist*.
-        2.  **Gemini Analysis:** The `gemini-2.5-pro` model acts as a *generalist*, 
+        2.  **Gemini Analysis:** The `gemini-2.5-flash` model acts as a *generalist*, 
             analyzing the article's tone, claims, and verifying sources.
     """)
     st.divider()
@@ -244,7 +245,7 @@ with st.sidebar:
 
     st.subheader("Training Data")
     st.markdown(
-        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](httpswww.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)", 
+        "**Real News (Diverse):** `AG News Dataset` (127,600 articles) from [Hugging Face](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset)", 
         unsafe_allow_html=True
     )
     st.markdown(
@@ -272,7 +273,7 @@ with col1:
             include_gemini = st.checkbox(
                 "Include Gemini Deeper Analysis",
                 value=False,
-                help="Get a summary and red-flag analysis (slower)."
+                help="Get a summary and red-flag analysis (slower). Uses API quota."
             )
             submitted = st.form_submit_button("Analyze", type="primary")
 
@@ -280,7 +281,7 @@ with col1:
             st.session_state.analysis_results = None
             st.rerun()
 
-# --- Analysis Logic (ALL FIXES APPLIED) ---
+# --- Analysis Logic ---
 if submitted:
     
     st.session_state.analysis_results = None
@@ -292,7 +293,6 @@ if submitted:
             ml_result = get_ml_prediction(text_input) 
             results["ml"] = ml_result
             
-            # This now correctly uses 'text_input'
             thinking_df, thinking_title = get_model_thinking(
                 text_input, 
                 vectorizer, 
@@ -307,7 +307,6 @@ if submitted:
             
             if include_gemini:
                 if GEMINI_ENABLED:
-                    # This now correctly uses 'text_input' and 'get_gemini_analysis'
                     gemini_result = get_gemini_analysis(text_input, ml_result.get('label', 'Unknown'))
                     results["gemini"] = gemini_result
                 else:
