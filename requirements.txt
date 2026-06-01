@@ -2,7 +2,7 @@ streamlit
 pandas
 scikit-learn
 joblib
-google-generativeai
+google-genai
 python-dotenv
 plotly
 datasets
